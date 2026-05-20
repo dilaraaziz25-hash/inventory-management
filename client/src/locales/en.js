@@ -4,6 +4,7 @@ export default {
     overview: 'Overview',
     inventory: 'Inventory',
     orders: 'Orders',
+    restocking: 'Restocking',
     finance: 'Finance',
     demandForecast: 'Demand Forecast',
     companyName: 'Catalyst Components',
@@ -112,6 +113,11 @@ export default {
     onTimeDelivery: 'On-Time Delivery',
     itemsCount: '{count} items',
     quantity: 'Qty',
+    submittedOrders: 'Submitted Orders',
+    leadTime: 'Lead Time',
+    daysRemaining: '{count} days remaining',
+    overdue: 'Overdue',
+    today: 'Today',
     table: {
       orderNumber: 'Order Number',
       orderId: 'Order ID',
@@ -204,6 +210,7 @@ export default {
     shipped: 'Shipped',
     processing: 'Processing',
     backordered: 'Backordered',
+    submitted: 'Submitted',
     inStock: 'In Stock',
     lowStock: 'Low Stock',
     adequate: 'Adequate'
@@ -324,5 +331,34 @@ export default {
     filter: 'Filter',
     export: 'Export',
     items: 'items'
+  },
+
+  // Restocking
+  restocking: {
+    title: 'Restocking',
+    description: 'Set your budget and place restock orders based on the latest demand forecast.',
+    budgetLabel: 'Available Budget',
+    budgetHelp: 'Drag the slider or enter an amount.',
+    recommendationsTitle: 'Recommended Items',
+    noRecommendations: 'No recommendations available for this budget. Increase the budget to see options.',
+    estimated: 'est.',
+    placeOrder: 'Place Order',
+    selectedCount: '{count} items selected',
+    selectedTotal: 'Selected Total',
+    remainingBudget: 'Remaining Budget',
+    confirmTitle: 'Order Submitted',
+    confirmBody: 'Your restock order has been placed and will appear in the Orders tab.',
+    viewInOrders: 'View in Orders',
+    orderNumber: 'Order Number',
+    expectedDelivery: 'Expected Delivery',
+    table: {
+      include: 'Include',
+      sku: 'SKU',
+      name: 'Name',
+      trend: 'Trend',
+      suggestedQty: 'Suggested Qty',
+      unitCost: 'Unit Cost',
+      lineTotal: 'Line Total'
+    }
   }
 }
