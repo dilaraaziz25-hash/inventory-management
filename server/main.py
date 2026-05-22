@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
@@ -80,6 +81,7 @@ class Order(BaseModel):
     actual_delivery: Optional[str] = None
     warehouse: Optional[str] = None
     category: Optional[str] = None
+    source: Optional[str] = None
 
 class DemandForecast(BaseModel):
     id: str
@@ -119,6 +121,34 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockRecommendation(BaseModel):
+    sku: str
+    name: str
+    trend: str
+    unit_cost: float
+    suggested_quantity: int
+    line_total: float
+    price_estimated: bool
+    priority_score: float
+
+class RestockRecommendationsResponse(BaseModel):
+    budget: float
+    recommendations: List[RestockRecommendation]
+    total_cost: float
+    remaining_budget: float
+
+class RestockOrderItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_price: float
+
+class SubmitRestockingRequest(BaseModel):
+    items: List[RestockOrderItem]
+
+RESTOCK_LEAD_TIME_DAYS = 14
+TREND_WEIGHTS = {"increasing": 1.5, "stable": 1.0, "decreasing": 0.3}
 
 # API endpoints
 @app.get("/")
@@ -303,6 +333,145 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.get("/api/restocking/recommendations", response_model=RestockRecommendationsResponse)
+def get_restocking_recommendations(budget: float):
+    """Recommend items to restock from the demand forecast within a budget.
+
+    Joins forecasts with inventory for pricing. SKUs without an inventory match
+    fall back to the average inventory unit_cost and are flagged with
+    price_estimated=True. Items are ranked by a priority score (trend weight x
+    shortage / reorder breach / forecast volume) and greedily selected.
+    """
+    if budget <= 0:
+        raise HTTPException(status_code=400, detail="budget must be greater than 0")
+
+    if not inventory_items:
+        raise HTTPException(status_code=500, detail="No inventory data available")
+
+    avg_unit_cost = sum(item["unit_cost"] for item in inventory_items) / len(inventory_items)
+    inventory_by_sku = {item["sku"]: item for item in inventory_items}
+
+    scored = []
+    for forecast in demand_forecasts:
+        sku = forecast["item_sku"]
+        match = inventory_by_sku.get(sku)
+        if match:
+            unit_cost = float(match["unit_cost"])
+            quantity_on_hand = int(match["quantity_on_hand"])
+            reorder_point = int(match["reorder_point"])
+            price_estimated = False
+        else:
+            unit_cost = round(avg_unit_cost, 2)
+            quantity_on_hand = 0
+            reorder_point = 0
+            price_estimated = True
+
+        forecasted = int(forecast["forecasted_demand"])
+        shortage = max(0, forecasted - quantity_on_hand)
+        reorder_breach = max(0, reorder_point - quantity_on_hand)
+        trend_weight = TREND_WEIGHTS.get(forecast["trend"].lower(), 1.0)
+        priority_score = trend_weight * (shortage + 2 * reorder_breach + 0.1 * forecasted)
+
+        suggested_quantity = max(forecasted - quantity_on_hand, reorder_point)
+        if suggested_quantity <= 0:
+            suggested_quantity = forecasted
+
+        scored.append({
+            "sku": sku,
+            "name": forecast["item_name"],
+            "trend": forecast["trend"],
+            "unit_cost": round(unit_cost, 2),
+            "suggested_quantity": suggested_quantity,
+            "price_estimated": price_estimated,
+            "priority_score": round(priority_score, 2),
+        })
+
+    scored.sort(key=lambda r: r["priority_score"], reverse=True)
+
+    remaining = budget
+    recommendations: List[RestockRecommendation] = []
+    for row in scored:
+        qty = row["suggested_quantity"]
+        cost = row["unit_cost"]
+        if cost <= 0:
+            continue
+        line_total = qty * cost
+        if line_total > remaining:
+            qty = int(remaining // cost)
+            if qty < 1:
+                continue
+            line_total = qty * cost
+        recommendations.append(RestockRecommendation(
+            sku=row["sku"],
+            name=row["name"],
+            trend=row["trend"],
+            unit_cost=cost,
+            suggested_quantity=qty,
+            line_total=round(line_total, 2),
+            price_estimated=row["price_estimated"],
+            priority_score=row["priority_score"],
+        ))
+        remaining -= line_total
+
+    total_cost = round(sum(r.line_total for r in recommendations), 2)
+    return RestockRecommendationsResponse(
+        budget=budget,
+        recommendations=recommendations,
+        total_cost=total_cost,
+        remaining_budget=round(budget - total_cost, 2),
+    )
+
+
+@app.post("/api/restocking/orders", response_model=Order, status_code=201)
+def submit_restocking_order(payload: SubmitRestockingRequest):
+    """Submit a restocking order. Appends to the in-memory orders list.
+
+    Restart of the server clears submitted orders (no disk persistence).
+    """
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    existing_rst = [o for o in orders if o.get("order_number", "").startswith("RST-2025-")]
+    next_seq = 1
+    for o in existing_rst:
+        try:
+            seq = int(o["order_number"].split("-")[-1])
+            next_seq = max(next_seq, seq + 1)
+        except (ValueError, IndexError):
+            continue
+
+    next_id = 1
+    for o in orders:
+        try:
+            next_id = max(next_id, int(o["id"]) + 1)
+        except (ValueError, KeyError):
+            continue
+
+    now = datetime.now()
+    order_date = now.isoformat(timespec="seconds")
+    expected_delivery = (now + timedelta(days=RESTOCK_LEAD_TIME_DAYS)).isoformat(timespec="seconds")
+
+    items_dicts = [item.model_dump() for item in payload.items]
+    total_value = round(sum(i["quantity"] * i["unit_price"] for i in items_dicts), 2)
+
+    new_order = {
+        "id": str(next_id),
+        "order_number": f"RST-2025-{next_seq:04d}",
+        "customer": "Internal Restock",
+        "items": items_dicts,
+        "status": "Submitted",
+        "order_date": order_date,
+        "expected_delivery": expected_delivery,
+        "total_value": total_value,
+        "actual_delivery": None,
+        "warehouse": None,
+        "category": None,
+        "source": "restock",
+    }
+    orders.append(new_order)
+    return new_order
+
 
 if __name__ == "__main__":
     import uvicorn

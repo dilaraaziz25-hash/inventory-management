@@ -8,6 +8,53 @@
     <div v-if="loading" class="loading">{{ t('common.loading') }}</div>
     <div v-else-if="error" class="error">{{ error }}</div>
     <div v-else>
+      <!-- Submitted (Restock) Orders -->
+      <div v-if="submittedOrders.length > 0" class="card">
+        <div class="card-header">
+          <h3 class="card-title">{{ t('orders.submittedOrders') }} ({{ submittedOrders.length }})</h3>
+        </div>
+        <div class="table-container">
+          <table class="orders-table">
+            <thead>
+              <tr>
+                <th class="col-order-number">{{ t('orders.table.orderNumber') }}</th>
+                <th class="col-items">{{ t('orders.table.items') }}</th>
+                <th class="col-value">{{ t('orders.table.totalValue') }}</th>
+                <th class="col-date">{{ t('orders.table.orderDate') }}</th>
+                <th class="col-date">{{ t('orders.table.expectedDelivery') }}</th>
+                <th class="col-lead-time">{{ t('orders.leadTime') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="order in submittedOrders" :key="order.id">
+                <td class="col-order-number"><strong>{{ order.order_number }}</strong></td>
+                <td class="col-items">
+                  <details class="items-details">
+                    <summary class="items-summary">
+                      {{ t('orders.itemsCount', { count: order.items.length }) }}
+                    </summary>
+                    <div class="items-dropdown">
+                      <div v-for="(item, idx) in order.items" :key="idx" class="item-entry">
+                        <span class="item-name">{{ item.name }}</span>
+                        <span class="item-meta">{{ t('orders.quantity') }}: {{ item.quantity }} @ {{ currencySymbol }}{{ item.unit_price }}</span>
+                      </div>
+                    </div>
+                  </details>
+                </td>
+                <td class="col-value"><strong>{{ currencySymbol }}{{ order.total_value.toLocaleString() }}</strong></td>
+                <td class="col-date">{{ formatDate(order.order_date) }}</td>
+                <td class="col-date">{{ formatDate(order.expected_delivery) }}</td>
+                <td class="col-lead-time">
+                  <span :class="['lead-time', { overdue: formatLeadTime(order.expected_delivery) === t('orders.overdue') }]">
+                    {{ formatLeadTime(order.expected_delivery) }}
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="stats-grid">
         <div class="stat-card success">
           <div class="stat-label">{{ t('status.delivered') }}</div>
@@ -29,7 +76,7 @@
 
       <div class="card">
         <div class="card-header">
-          <h3 class="card-title">{{ t('orders.allOrders') }} ({{ orders.length }})</h3>
+          <h3 class="card-title">{{ t('orders.allOrders') }} ({{ customerOrders.length }})</h3>
         </div>
         <div class="table-container">
           <table class="orders-table">
@@ -45,7 +92,7 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="order in orders" :key="order.id">
+              <tr v-for="order in customerOrders" :key="order.id">
                 <td class="col-order-number"><strong>{{ order.order_number }}</strong></td>
                 <td class="col-customer">{{ translateCustomerName(order.customer) }}</td>
                 <td class="col-items">
@@ -129,8 +176,11 @@ export default {
       loadOrders()
     })
 
+    const submittedOrders = computed(() => orders.value.filter(o => o.source === 'restock'))
+    const customerOrders = computed(() => orders.value.filter(o => o.source !== 'restock'))
+
     const getOrdersByStatus = (status) => {
-      return orders.value.filter(order => order.status === status)
+      return customerOrders.value.filter(order => order.status === status)
     }
 
     const getOrderStatusClass = (status) => {
@@ -138,7 +188,8 @@ export default {
         'Delivered': 'success',
         'Shipped': 'info',
         'Processing': 'warning',
-        'Backordered': 'danger'
+        'Backordered': 'danger',
+        'Submitted': 'info'
       }
       return statusMap[status] || 'info'
     }
@@ -153,6 +204,17 @@ export default {
       })
     }
 
+    const formatLeadTime = (isoDate) => {
+      const target = new Date(isoDate)
+      if (isNaN(target.getTime())) return ''
+      const now = new Date()
+      const diffMs = target - now
+      const days = Math.round(diffMs / (1000 * 60 * 60 * 24))
+      if (days < 0) return t('orders.overdue')
+      if (days === 0) return t('orders.today')
+      return t('orders.daysRemaining', { count: days })
+    }
+
     onMounted(loadOrders)
 
     return {
@@ -160,9 +222,12 @@ export default {
       loading,
       error,
       orders,
+      submittedOrders,
+      customerOrders,
       getOrdersByStatus,
       getOrderStatusClass,
       formatDate,
+      formatLeadTime,
       currencySymbol,
       translateProductName,
       translateCustomerName
@@ -201,6 +266,21 @@ export default {
 
 .col-value {
   width: 120px;
+}
+
+.col-lead-time {
+  width: 150px;
+}
+
+.lead-time {
+  font-size: 0.875rem;
+  color: #334155;
+  font-weight: 500;
+}
+
+.lead-time.overdue {
+  color: #dc2626;
+  font-weight: 600;
 }
 
 /* Items details styling */

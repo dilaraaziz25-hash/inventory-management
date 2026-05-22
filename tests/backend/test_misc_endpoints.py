@@ -1,6 +1,8 @@
 """
 Tests for miscellaneous API endpoints (demand, backlog, spending).
 """
+from datetime import datetime, timedelta
+
 import pytest
 
 
@@ -241,3 +243,128 @@ class TestRootEndpoint:
         assert "version" in data
         assert isinstance(data["message"], str)
         assert isinstance(data["version"], str)
+
+
+class TestRestockingEndpoints:
+    """Test suite for restocking endpoints."""
+
+    REQUIRED_RECO_FIELDS = {
+        "sku", "name", "trend", "unit_cost", "suggested_quantity",
+        "line_total", "price_estimated", "priority_score",
+    }
+
+    def test_recommendations_returns_within_budget(self, client):
+        """Total cost of recommendations must not exceed the budget."""
+        response = client.get("/api/restocking/recommendations?budget=25000")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert set(data.keys()) >= {"budget", "recommendations", "total_cost", "remaining_budget"}
+        assert data["budget"] == 25000
+        assert data["total_cost"] <= data["budget"] + 0.01
+        assert abs(data["remaining_budget"] - (data["budget"] - data["total_cost"])) < 0.01
+        assert isinstance(data["recommendations"], list)
+        assert len(data["recommendations"]) >= 1
+
+    def test_recommendation_item_structure(self, client):
+        """Every recommendation has the documented keys with proper types."""
+        response = client.get("/api/restocking/recommendations?budget=100000")
+        data = response.json()
+
+        for reco in data["recommendations"]:
+            assert set(reco.keys()) == self.REQUIRED_RECO_FIELDS
+            assert isinstance(reco["sku"], str)
+            assert isinstance(reco["name"], str)
+            assert reco["trend"].lower() in ("increasing", "stable", "decreasing")
+            assert isinstance(reco["unit_cost"], (int, float)) and reco["unit_cost"] > 0
+            assert isinstance(reco["suggested_quantity"], int) and reco["suggested_quantity"] >= 1
+            assert isinstance(reco["line_total"], (int, float))
+            assert isinstance(reco["price_estimated"], bool)
+            assert isinstance(reco["priority_score"], (int, float))
+            assert abs(reco["line_total"] - reco["suggested_quantity"] * reco["unit_cost"]) < 0.01
+
+    def test_recommendations_include_estimated_prices(self, client):
+        """At least one forecast SKU lacks an inventory match, so price_estimated should be True for some rows."""
+        response = client.get("/api/restocking/recommendations?budget=200000")
+        data = response.json()
+        assert any(r["price_estimated"] for r in data["recommendations"])
+
+    def test_recommendations_sorted_by_priority(self, client):
+        """Recommendations should be returned in descending priority order."""
+        response = client.get("/api/restocking/recommendations?budget=200000")
+        data = response.json()
+        scores = [r["priority_score"] for r in data["recommendations"]]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_recommendations_reject_zero_budget(self, client):
+        """budget=0 should return 400."""
+        response = client.get("/api/restocking/recommendations?budget=0")
+        assert response.status_code == 400
+        assert "detail" in response.json()
+
+    def test_recommendations_reject_negative_budget(self, client):
+        """budget<0 should return 400."""
+        response = client.get("/api/restocking/recommendations?budget=-100")
+        assert response.status_code == 400
+
+    def test_recommendations_missing_budget_param(self, client):
+        """Missing the required budget param should return 422 (FastAPI validation)."""
+        response = client.get("/api/restocking/recommendations")
+        assert response.status_code == 422
+
+    def test_submit_restocking_order(self, client):
+        """POST creates a restock order with the documented shape."""
+        payload = {
+            "items": [
+                {"sku": "PSU-501", "name": "5V 10A Switching Power Supply", "quantity": 50, "unit_price": 18.99},
+                {"sku": "FLT-405", "name": "Oil Filter Cartridge", "quantity": 10, "unit_price": 99.55},
+            ]
+        }
+        response = client.post("/api/restocking/orders", json=payload)
+        assert response.status_code == 201
+
+        order = response.json()
+        assert order["source"] == "restock"
+        assert order["status"] == "Submitted"
+        assert order["customer"] == "Internal Restock"
+        assert order["actual_delivery"] is None
+        assert order["order_number"].startswith("RST-2025-")
+        assert len(order["order_number"].split("-")[-1]) == 4
+        assert len(order["items"]) == 2
+
+        expected_total = round(50 * 18.99 + 10 * 99.55, 2)
+        assert abs(order["total_value"] - expected_total) < 0.01
+
+        order_dt = datetime.fromisoformat(order["order_date"])
+        expected_dt = datetime.fromisoformat(order["expected_delivery"])
+        assert (expected_dt - order_dt) == timedelta(days=14)
+
+    def test_submit_then_appears_in_orders(self, client):
+        """After POSTing a restock order, GET /api/orders should include it."""
+        payload = {
+            "items": [{"sku": "PSU-501", "name": "5V 10A Switching Power Supply", "quantity": 5, "unit_price": 18.99}]
+        }
+        created = client.post("/api/restocking/orders", json=payload).json()
+
+        listing = client.get("/api/orders").json()
+        matching = [o for o in listing if o["id"] == created["id"]]
+        assert len(matching) == 1
+        assert matching[0]["source"] == "restock"
+        assert matching[0]["status"] == "Submitted"
+
+    def test_submit_rejects_empty_items(self, client):
+        """POST with no items should return 400."""
+        response = client.post("/api/restocking/orders", json={"items": []})
+        assert response.status_code == 400
+
+    def test_submit_assigns_sequential_order_numbers(self, client):
+        """Successive POSTs should produce strictly increasing RST order numbers."""
+        payload = {
+            "items": [{"sku": "PSU-501", "name": "5V 10A Switching Power Supply", "quantity": 1, "unit_price": 18.99}]
+        }
+        first = client.post("/api/restocking/orders", json=payload).json()
+        second = client.post("/api/restocking/orders", json=payload).json()
+
+        first_seq = int(first["order_number"].split("-")[-1])
+        second_seq = int(second["order_number"].split("-")[-1])
+        assert second_seq == first_seq + 1
